@@ -38,15 +38,16 @@ try:
     API_HASH = os.getenv('API_HASH')
 
     # ПУТЬ К ПОСТОЯННОМУ ХРАНИЛИЩУ (Volume) НА RAILWAY
-    # Railway монтирует том в RAILWAY_VOLUME_MOUNT_PATH, если он указан
-    SESSION_FOLDER = os.getenv('RAILWAY_VOLUME_MOUNT_PATH', '.')
+    # Railway монтирует том в путь, указанный в railway.json
+    SESSION_FOLDER = '/app/sessions' # <-- ПУТЬ К ХРАНИЛИЩУ
     RAW_SESSION_NAME = os.getenv('SESSION_NAME', 'admin_secretary_session_new')
     
-    # Полный путь к файлу сессии (например: /mnt/volume/admin_secretary_session_new)
+    # Полный путь к файлу сессии (например: /app/sessions/admin_secretary_session_new)
     SESSION_NAME = str(Path(SESSION_FOLDER) / RAW_SESSION_NAME) 
 
     if not API_ID_ENV or not API_HASH:
-        raise ValueError("API_ID or API_HASH missing in .env file")
+        # Проверка, что ключи API заданы как переменные окружения
+        raise ValueError("API_ID or API_HASH missing in environment variables.")
         
     API_ID = int(API_ID_ENV)
 
@@ -74,7 +75,7 @@ try:
     RESPONSE_OFFLINE_DYNAMIC = TEXTS['dynamic_offline']
     
 except FileNotFoundError:
-    print("FATAL ERROR: 'config.json' or '.env' not found. Please check your project structure.")
+    print("FATAL ERROR: 'config.json' not found. Please check your project structure.")
     exit(1)
 except json.JSONDecodeError as e:
     print(f"FATAL ERROR: 'config.json' contains invalid JSON.\nError at line {e.lineno}, column {e.colno}: {e.msg}")
@@ -147,19 +148,19 @@ class ResponseManager:
         Загружает лог ответов, используя asyncio.to_thread.
         """
         def sync_load():
-            # NOTE: Мы не меняем путь к RESPONSES_FILE, так как он
-            # может быть привязан к тому же VOLUME, что и SESSION_FILE
-            if os.path.exists(RESPONSES_FILE):
+            # NOTE: Мы используем путь к файлу логов
+            log_file_path = str(Path(SESSION_FOLDER) / RESPONSES_FILE)
+            if os.path.exists(log_file_path):
                 try:
-                    with open(RESPONSES_FILE, 'r', encoding='utf-8') as f:
+                    with open(log_file_path, 'r', encoding='utf-8') as f:
                         return json.load(f)
                 except json.JSONDecodeError:
                     # Бэкап поврежденного файла
                     timestamp = int(time.time())
-                    backup_name = f"{RESPONSES_FILE}.corrupted_{timestamp}.bak"
+                    backup_name = f"{log_file_path}.corrupted_{timestamp}.bak"
                     try:
-                        shutil.copy(RESPONSES_FILE, backup_name)
-                        logger.critical(f"⚠️ Log file '{RESPONSES_FILE}' is corrupted (invalid JSON).")
+                        shutil.copy(log_file_path, backup_name)
+                        logger.critical(f"⚠️ Log file '{log_file_path}' is corrupted (invalid JSON).")
                         logger.critical(f"💾 BACKUP CREATED: {backup_name}")
                         logger.warning("Starting with a fresh log to keep the bot running.")
                     except Exception as backup_error:
@@ -167,7 +168,7 @@ class ResponseManager:
                     return {}
                 except IOError as e:
                     # ФАТАЛЬНЫЙ СБОЙ ВВОДА/ВЫВОДА -> ОСТАНОВКА
-                    logger.critical(f"❌ FATAL I/O ERROR reading log file '{RESPONSES_FILE}': {e}")
+                    logger.critical(f"❌ FATAL I/O ERROR reading log file '{log_file_path}': {e}")
                     raise RuntimeError("Cannot safely proceed without log file access.") from e
             return {}
             
@@ -183,9 +184,11 @@ class ResponseManager:
         now_iso = datetime.now(timezone.utc).isoformat()
         log[user_id] = now_iso
         
+        log_file_path = str(Path(SESSION_FOLDER) / RESPONSES_FILE)
+        
         def sync_save():
             try:
-                with open(RESPONSES_FILE, 'w', encoding='utf-8') as f:
+                with open(log_file_path, 'w', encoding='utf-8') as f:
                     json.dump(log, f, indent=4, ensure_ascii=False)
             except IOError as e:
                 logger.error(f"Failed to save log file: {e}")
@@ -345,12 +348,13 @@ async def main():
     #            💥 АВТОРИЗАЦИЯ НА RAILWAY 💥
     # =========================================================
     
-    # 1. Получаем переменные для авторизации
+    # 1. Получаем переменные для авторизации (будут пустыми, пока вы их не введете)
     phone = os.getenv('PHONE_NUMBER')
     code = os.getenv('LOGIN_CODE')
     password = os.getenv('PASSWORD_2FA')
 
     try:
+        # Пытаемся запустить, используя файл сессии (если он есть) или данные для входа (если их ввели)
         await client.start(
             phone=phone, 
             code=code, 
@@ -358,14 +362,12 @@ async def main():
         )
     except Exception as e:
         logger.critical(f"❌ Ошибка авторизации: {e}")
-        # Проверяем, нужно ли вводить код или пароль
+        # Это ожидаемо, пока вы не введете PHONE_NUMBER и LOGIN_CODE
         if 'phone_number' in str(e) or 'code' in str(e):
-             # ЭТО ОЖИДАЕМАЯ ОШИБКА НА ПЕРВЫХ ЭТАПАХ АВТОРИЗАЦИИ
              logger.warning("⚠️ Требуется ввести телефон, код или пароль. Добавьте их как переменные окружения на Railway.")
         
     
     # Убедитесь, что бот выходит в оффлайн, чтобы не отображаться онлайн 24/7
-    # (Это не будет работать, если авторизация не пройдена)
     try:
         await client(UpdateStatusRequest(offline=True))
     except Exception as e:
@@ -376,7 +378,7 @@ async def main():
     print(f"🔍 Админ ID: {ADMIN_ID_TO_CHECK}")
     print(f"⏱️ Порог 'Онлайн': {ONLINE_THRESHOLD_SEC/60:.0f} мин")
     print(f"⏱️ Кэш статуса: {STATUS_CACHE_TTL_SEC} сек")
-    print(f"💾 Лог файл: {RESPONSES_FILE}")
+    print(f"💾 Файл сессии: {SESSION_NAME}.session")
     print(f"-------------------------------------------\n")
     
     # Обернем process_message в lambda, чтобы передать status_cache
@@ -387,6 +389,8 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
+    # Создаем папку сессий, если ее нет (это нужно для первого запуска)
+    Path(SESSION_FOLDER).mkdir(parents=True, exist_ok=True)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
