@@ -6,6 +6,7 @@ import logging
 import shutil
 from typing import Dict, Optional, Union
 from datetime import datetime, timezone, timedelta
+from pathlib import Path  # <-- ДОБАВЛЕНО для работы с путями
 
 # --- ДОПОЛНИТЕЛЬНЫЕ ИМПОРТЫ ---
 from dotenv import load_dotenv
@@ -32,10 +33,17 @@ try:
     with open('config.json', 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # 1.1. Доступы (из .env)
+    # 1.1. Доступы (из .env и переменных окружения Railway)
     API_ID_ENV = os.getenv('API_ID')
     API_HASH = os.getenv('API_HASH')
-    SESSION_NAME = os.getenv('SESSION_NAME')
+
+    # ПУТЬ К ПОСТОЯННОМУ ХРАНИЛИЩУ (Volume) НА RAILWAY
+    # Railway монтирует том в RAILWAY_VOLUME_MOUNT_PATH, если он указан
+    SESSION_FOLDER = os.getenv('RAILWAY_VOLUME_MOUNT_PATH', '.')
+    RAW_SESSION_NAME = os.getenv('SESSION_NAME', 'admin_secretary_session_new')
+    
+    # Полный путь к файлу сессии (например: /mnt/volume/admin_secretary_session_new)
+    SESSION_NAME = str(Path(SESSION_FOLDER) / RAW_SESSION_NAME) 
 
     if not API_ID_ENV or not API_HASH:
         raise ValueError("API_ID or API_HASH missing in .env file")
@@ -139,6 +147,8 @@ class ResponseManager:
         Загружает лог ответов, используя asyncio.to_thread.
         """
         def sync_load():
+            # NOTE: Мы не меняем путь к RESPONSES_FILE, так как он
+            # может быть привязан к тому же VOLUME, что и SESSION_FILE
             if os.path.exists(RESPONSES_FILE):
                 try:
                     with open(RESPONSES_FILE, 'r', encoding='utf-8') as f:
@@ -321,15 +331,46 @@ async def main():
     print(f"\n🛡️ SMART SECRETARY v7.2 (FINAL) 🛡️")
     print(f"-------------------------------------------")
     
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client = TelegramClient(
+        SESSION_NAME, 
+        API_ID, 
+        API_HASH, 
+        system_version="4.16.30-vxWorks" # Улучшаем стабильность сессии
+    )
     
     # Создаем инстанс кэша
     status_cache = AdminStatusCache(STATUS_CACHE_TTL_SEC)
     
-    await client.start()
-    # Убедитесь, что бот выходит в оффлайн, чтобы не отображаться онлайн 24/7
-    await client(UpdateStatusRequest(offline=True))
+    # =========================================================
+    #            💥 АВТОРИЗАЦИЯ НА RAILWAY 💥
+    # =========================================================
     
+    # 1. Получаем переменные для авторизации
+    phone = os.getenv('PHONE_NUMBER')
+    code = os.getenv('LOGIN_CODE')
+    password = os.getenv('PASSWORD_2FA')
+
+    try:
+        await client.start(
+            phone=phone, 
+            code=code, 
+            password=password
+        )
+    except Exception as e:
+        logger.critical(f"❌ Ошибка авторизации: {e}")
+        # Проверяем, нужно ли вводить код или пароль
+        if 'phone_number' in str(e) or 'code' in str(e):
+             # ЭТО ОЖИДАЕМАЯ ОШИБКА НА ПЕРВЫХ ЭТАПАХ АВТОРИЗАЦИИ
+             logger.warning("⚠️ Требуется ввести телефон, код или пароль. Добавьте их как переменные окружения на Railway.")
+        
+    
+    # Убедитесь, что бот выходит в оффлайн, чтобы не отображаться онлайн 24/7
+    # (Это не будет работать, если авторизация не пройдена)
+    try:
+        await client(UpdateStatusRequest(offline=True))
+    except Exception as e:
+        logger.warning(f"Не удалось установить статус Offline: {e}")
+        
     me = await client.get_me()
     print(f"👤 Секретарь: @{me.username}")
     print(f"🔍 Админ ID: {ADMIN_ID_TO_CHECK}")
